@@ -1,82 +1,95 @@
-# Geometry Prior and Geometry Self-Attention Breakdown
+# Geometry Prior & Geometry Self-Attention — Guided Notes
 
-## 1. Plain-language summary of the mathematical tricks
-- **Depth patches as geometry probes.** The raw depth image is resized to the token grid used in each encoder stage so that every visual token shares a co-located depth sample. The average/resize step condenses the pixels inside a patch into a single distance-from-camera reading that can act as the token's 3D anchor.【F:models/encoders/DFormerv2.py†L196-L206】【F:sgmixed.txt†L231-L260】
-- **Manhattan and depth distances become per-head decay factors.** For each attention head, the model multiplies the Manhattan distance between token coordinates and the absolute difference between their depth values by a learnable log-decay slope. Adding this log-bias to the attention logits is equivalent to multiplying the attention weights by \(\beta^{\text{distance}}\) with head-specific \(0<\beta<1\), shrinking the influence of geometrically distant tokens.【F:models/encoders/DFormerv2.py†L129-L191】【F:sgmixed.txt†L261-L320】
-- **Two learnable "memory" coefficients mix spatial and depth cues.** A pair of trainable scalars controls how much the attention mask trusts spatial layout versus depth similarity, allowing the network to favor whichever signal is more reliable in a scene.【F:models/encoders/DFormerv2.py†L138-L191】【F:sgmixed.txt†L304-L320】
-- **Rotary positional encoding (RoPE) ties priors to the queries/keys.** Sine and cosine waves derived from token indices rotate every head's query and key vectors so that spatial order information is baked into the dot products without adding extra tensors.【F:models/encoders/DFormerv2.py†L109-L187】
-- **Depth-guided 1D decomposed attention reduces cost.** In early stages, attention is applied along width and height separately with matching 1D geometry masks, cutting the quadratic cost while still nudging the focus toward depth-consistent neighbours.【F:models/encoders/DFormerv2.py†L206-L276】【F:sgmixed.txt†L321-L392】
-- **Depthwise convolutional residual encodes local context.** After attention, a depthwise 5×5 convolution (LEPE) adds fine-grained spatial bias before the output projection, reinforcing local structure.【F:models/encoders/DFormerv2.py†L220-L258】
+> These notes repackage the math used in the DFormer encoder into an easy-to-skim walkthrough. Each section mirrors the order of computations in the code so you can jump between equations and implementation without deciphering dense prose.
 
-## 2. Geometry prior generation with explicit tensor shapes
-For a stage whose token grid has height \(H\) and width \(W\):
+## 0. Notation & shapes
+| Symbol | Meaning | Shape |
+| --- | --- | --- |
+| $h, w$ | Input image height & width (pixels) | Scalars |
+| $p$ | Patch size used for the stem | Scalar |
+| $H = h / p$, $W = w / p$ | Token grid height & width | Scalars |
+| $N = HW$ | Number of tokens at a stage | Scalar |
+| $C$ | Channel dimension per token | Scalar |
+| $x \in \mathbb{R}^{N \times C}$ | Token features before attention | $N \times C$ |
+| $d \in \mathbb{R}^{h \times w}$ | Original depth map | $h \times w$ |
+| $z \in \mathbb{R}^{H \times W}$ | Depth map downsampled to the token grid | $H \times W$ |
+| $Q, K, V \in \mathbb{R}^{N \times d_k}$ | Per-head query/key/value matrices | $N \times d_k$ |
+| $S, D \in \mathbb{R}^{N \times N}$ | Spatial & depth distance matrices | $N \times N$ |
+| $w_s, w_d$ | Learnable scalars mixing spatial & depth cues | Scalars |
+| $G \in \mathbb{R}^{N \times N}$ | Geometry prior (log-bias matrix) | $N \times N$ |
+| $\beta$ | Per-head decay base in $(0,1)$ | Scalar |
 
-1. **Depth alignment.** Given a batch of depth maps \(D_{\text{raw}} \in \mathbb{R}^{B\times1\times H_d\times W_d}\), bilinear interpolation produces \(D \in \mathbb{R}^{B\times1\times H\times W}\) so that each visual token has a matching depth sample.【F:models/encoders/DFormerv2.py†L166-L191】
-2. **Depth vectorization.** Flatten \(D\) into \(z \in \mathbb{R}^{B\times HW}\) where \(z_{b,p}\) corresponds to patch index \(p = i\cdot W + j\).【F:models/encoders/DFormerv2.py†L151-L166】
-3. **Depth distance per head.** For head \(c\), compute
-   \[
-   \Delta^{(c)}_{b,p,q} = |z_{b,p} - z_{b,q}|\,\lambda_c,
-   \]
-   where \(\lambda_c = \log\bigl(1 - 2^{-(\texttt{initial\_value} + \texttt{heads\_range} \cdot c / N_h)}\bigr) < 0\) and the resulting tensor has shape \(B\times N_h\times HW\times HW\).【F:models/encoders/DFormerv2.py†L146-L191】
-4. **Spatial Manhattan distance per head.** Enumerate the token coordinates \((i_p,j_p)\). For head \(c\), form
-   \[
-   M^{(c)}_{p,q} = (|i_p-i_q| + |j_p-j_q|)\,\lambda_c,
-   \]
-   yielding \(N_h\times HW\times HW\).【F:models/encoders/DFormerv2.py†L155-L191】
-5. **Learnable fusion.** Let the trainable scalars be \(w_s = \texttt{weight}[0]\) and \(w_d = \texttt{weight}[1]\). The full attention geometry mask becomes
-   \[
-   G_{b,c,p,q} = w_s M^{(c)}_{p,q} + w_d \Delta^{(c)}_{b,p,q} \in \mathbb{R}^{B\times N_h\times HW\times HW}.
-   \]
-   In decomposed blocks, two analogous masks are built: \(G^h \in \mathbb{R}^{B\times N_h\times W\times H\times H}\) for column-wise attention and \(G^w \in \mathbb{R}^{B\times N_h\times H\times W\times W}\) for row-wise attention.【F:models/encoders/DFormerv2.py†L166-L191】【F:models/encoders/DFormerv2.py†L191-L206】
-6. **Rotary sinusoid cache.** For each head, create \(\sin,\cos \in \mathbb{R}^{H\times W\times d_k}\) with frequencies defined by the shared \(\texttt{angle}\) vector. These tensors enable RoPE without additional parameters.【F:models/encoders/DFormerv2.py†L172-L191】
+## 1. Depth & spatial priors (definitions)
+The goal is to create per-token distances that reflect both image-plane offsets and actual depth discontinuities.
 
-The tuple \(((\sin,\cos), G)\) (or \(((\sin,\cos), (G^h, G^w))\) in the decomposed case) is the geometry prior consumed by the attention layers.
+1. **Depth pooling to token scale.** Average pooling with kernel/stride $p$ aligns the depth map with the token grid:
+   $$
+   z_{ij} = \frac{1}{p^2} \sum_{u=pi}^{p(i+1)-1} \sum_{v=pj}^{p(j+1)-1} d_{uv} \in \mathbb{R}, \qquad z \in \mathbb{R}^{H \times W}.
+   $$
+2. **Depth distance matrix.** For two token indices $p=(i,j)$ and $q=(i',j')$:
+   $$
+   D_{pq} = \lvert z_{ij} - z_{i'j'} \rvert, \qquad D \in \mathbb{R}^{N \times N}.
+   $$
+3. **Spatial Manhattan distance.** Encode 2D offsets with the $L_1$ metric:
+   $$
+   S_{pq} = \lvert i - i' \rvert + \lvert j - j' \rvert, \qquad S \in \mathbb{R}^{N \times N}.
+   $$
+Both matrices are symmetric with zeros on the diagonal, so self-relations stay unpenalized.
 
-## 3. Geometry self-attention with expanded formulas
-Let the input features be \(X \in \mathbb{R}^{B\times H\times W\times C}\) and \(N_h\) heads with key dimension \(d_k = C/N_h\).
+## 2. Prior fusion → geometry prior $G$
+Two learnable scalars (shared by all heads in a block) mix the distance cues into a single log-bias matrix:
 
-### 3.1 Full geometry self-attention (fourth stage)
-1. **Linear projections.**
-   \[
-   Q = X W_Q,\quad K = X W_K,\quad V = X W_V,\quad W_Q,W_K \in \mathbb{R}^{C\times C},\ W_V \in \mathbb{R}^{C\times C}.
-   \]
-   Shapes remain \(B\times H\times W\times C\).【F:models/encoders/DFormerv2.py†L220-L240】
-2. **Head reshaping and scaling.** Reshape to \(\tilde{Q},\tilde{K} \in \mathbb{R}^{B\times N_h\times H\times W\times d_k}\), multiply keys by \(d_k^{-1/2}\).【F:models/encoders/DFormerv2.py†L233-L242】
-3. **Rotary transform.** Apply RoPE component-wise:
-   \[
-   \text{RoPE}(\tilde{Q})_{b,c,i,j,2t} = \tilde{Q}_{b,c,i,j,2t}\cos_{i,j,t} - \tilde{Q}_{b,c,i,j,2t+1}\sin_{i,j,t},
-   \]
-   \[
-   \text{RoPE}(\tilde{Q})_{b,c,i,j,2t+1} = \tilde{Q}_{b,c,i,j,2t+1}\cos_{i,j,t} + \tilde{Q}_{b,c,i,j,2t}\sin_{i,j,t},
-   \]
-   and similarly for \(\tilde{K}\).【F:models/encoders/DFormerv2.py†L109-L187】
-4. **Flatten tokens.** Flatten \(H\times W\) so that \(Q_r,K_r \in \mathbb{R}^{B\times N_h\times HW\times d_k}\) and \(V_r \in \mathbb{R}^{B\times N_h\times HW\times d_v}\) with \(d_v=d_k\).【F:models/encoders/DFormerv2.py†L240-L258】
-5. **Geometry-biased logits.** Compute logits and inject the mask:
-   \[
-   L_{b,c,p,q} = Q_{r,b,c,p,:} K_{r,b,c,q,:}^{\top} + G_{b,c,p,q}.
-   \]
-6. **Softmax with implicit decay.**
-   \[
-   A_{b,c,p,q} = \frac{\exp(L_{b,c,p,q})}{\sum_{q'} \exp(L_{b,c,p,q'})} = \frac{\exp(Q_{r,b,c,p,:}K_{r,b,c,q,:}^{\top})\, \beta_c^{\text{dist}_{b,c,p,q}}}{\sum_{q'} \exp(Q_{r,b,c,p,:}K_{r,b,c,q',:}^{\top})\, \beta_c^{\text{dist}_{b,c,p,q'}}},
-   \]
-   where \(\beta_c = e^{\lambda_c}\) and \(\text{dist}\) denotes the fused geometry distance.【F:models/encoders/DFormerv2.py†L244-L258】
-7. **Weighted sum and projection.**
-   \[
-   O_{b,c,p,:} = \sum_q A_{b,c,p,q} V_{r,b,c,q,:},\quad Y = \text{reshape}(O) + \text{LEPE}(V).
-   \]
-   Finally, \(Y\) passes through \(W_O \in \mathbb{R}^{C\times C}\) to return to \(\mathbb{R}^{B\times H\times W\times C}\).【F:models/encoders/DFormerv2.py†L250-L258】
+1. **Weighted blend.**
+   $$
+   G_{pq} = w_s S_{pq} + w_d D_{pq}, \qquad w_s, w_d \ge 0.
+   $$
+2. **Head-specific decay.** Each attention head $c$ carries a learnable slope $\lambda_c < 0$. Adding $\lambda_c G$ to the logits is equivalent to multiplying attention weights by $\beta_c^{G_{pq}}$ with $\beta_c = e^{\lambda_c} \in (0,1)$. The network therefore learns how aggressively to penalize long-range or cross-depth interactions.
+3. **Caching shapes.**
+   - Full attention: $G \in \mathbb{R}^{B \times N_h \times N \times N}$ after broadcasting batch/head axes.
+   - Decomposed attention: reshape $G$ into $G^w \in \mathbb{R}^{B \times N_h \times H \times W \times W}$ (row pass) and $G^h \in \mathbb{R}^{B \times N_h \times W \times H \times H}$ (column pass).
 
-### 3.2 Decomposed geometry self-attention (stages 1–3)
-1. **Shared projections and RoPE.** Steps 1–3 above remain unchanged, delivering \(\tilde{Q}, \tilde{K}, V\).【F:models/encoders/DFormerv2.py†L233-L243】
-2. **Width-wise attention.** For every row \(i\), head \(c\), and batch \(b\):
-   - Queries/keys: \(Q^w_{b,i,c} \in \mathbb{R}^{W\times d_k}\), \(K^w_{b,i,c} \in \mathbb{R}^{W\times d_k}\).
-   - Logits with mask \(G^w_{b,i,c} \in \mathbb{R}^{W\times W}\):
-     \(L^w_{b,i,c} = Q^w_{b,i,c} (K^w_{b,i,c})^{\top} + G^w_{b,i,c}\).
-   - Softmax over the width dimension and apply to values \(V^w_{b,i,c} \in \mathbb{R}^{W\times d_v}\), producing \(U_{b,i,c} \in \mathbb{R}^{W\times d_v}\).【F:models/encoders/DFormerv2.py†L243-L254】
-3. **Height-wise attention.** Treat each column \(j\) with values from the previous step:
-   - Queries/keys: \(Q^h_{b,j,c} \in \mathbb{R}^{H\times d_k}\), \(K^h_{b,j,c} \in \mathbb{R}^{H\times d_k}\).
-   - Geometry mask \(G^h_{b,j,c} \in \mathbb{R}^{H\times H}\).
-   - Apply softmax to \(L^h_{b,j,c} = Q^h_{b,j,c} (K^h_{b,j,c})^{\top} + G^h_{b,j,c}\) and weight the column-wise values from \(U\) to yield \(O_{b,j,c} \in \mathbb{R}^{H\times d_v}\).【F:models/encoders/DFormerv2.py†L254-L258】
-4. **Reassembly and output projection.** Rearrange \(O\) back to \(B\times H\times W\times (N_h d_v)\), add the LEPE convolutional bias, and apply the final linear layer exactly as in the full-attention case.【F:models/encoders/DFormerv2.py†L256-L258】
+## 3. Geometry self-attention (full head)
+With per-head dimensionality $d_k = C / N_h$ and $X \in \mathbb{R}^{B \times H \times W \times C}$:
 
-These steps show how every intermediate tensor size and operation is grounded in explicit geometry-aware computations rather than abstract "priors".
+1. **Linear projections.** Compute $Q$, $K$, $V$ via learned matrices $W_q$, $W_k$, $W_v$.
+2. **Reshape & scale.** Rearrange to $Q, K, V \in \mathbb{R}^{B \times N_h \times N \times d_k}$ and scale $K$ by $1/\sqrt{d_k}$.
+3. **Rotary embedding (RoPE).** Apply cached sine/cosine pairs so that spatial indices affect $Q$ and $K$ without extra tensors.
+4. **Logits with geometry bias.**
+   $$
+   L_{b,c,p,q} = Q_{b,c,p,:} K_{b,c,q,:}^{\top} + \lambda_c G_{b,p,q}.
+   $$
+5. **Softmax + decay.**
+   $$
+   A_{b,c,p,q} = \frac{\exp(L_{b,c,p,q})}{\sum_{q'} \exp(L_{b,c,p,q'})} = \text{Softmax}(L_{b,c,p,:})_q.
+   $$
+6. **Weighted sum & output.** Multiply $A$ with $V$, add the local enhancement (depthwise $5\times5$ convolution, i.e., LEPE), and project back with $W_o$.
+
+## 4. Decomposed geometry attention (row/column factorization)
+Early stages split attention into horizontal and vertical 1D passes to avoid $N^2$ cost.
+
+1. **Shared projections.** Use the same $Q$, $K$, $V$ as in the full case.
+2. **Row (width) pass.** For each batch $b$, head $c$, and row index $i$:
+   - Extract $Q^w_{b,c,i} \in \mathbb{R}^{W \times d_k}$, $K^w_{b,c,i}$, $V^w_{b,c,i}$.
+   - Add row-wise mask $G^w_{b,c,i} \in \mathbb{R}^{W \times W}$.
+   - Softmax along the width dimension to obtain $U_{b,c,i} \in \mathbb{R}^{W \times d_k}$.
+3. **Column (height) pass.** Using the intermediate $U$:
+   - Form $Q^h_{b,c,j} \in \mathbb{R}^{H \times d_k}$ and $K^h_{b,c,j}$ for each column $j$.
+   - Inject column mask $G^h_{b,c,j} \in \mathbb{R}^{H \times H}$.
+   - Softmax along height to produce $O_{b,c,j} \in \mathbb{R}^{H \times d_k}$.
+4. **Stitch & project.** Rearrange $O$ back to $B \times H \times W \times C$, add LEPE, and apply the final linear layer.
+
+## 5. Stage-by-stage cheat sheet
+| Stage | Resolution | Token count $N_s$ | Channels $C_s$ | Attention type |
+| --- | --- | --- | --- | --- |
+| 1 | $H \times W$ (1/4 of image) | $N$ | $C$ | Decomposed |
+| 2 | $(H/2) \times (W/2)$ | $N/4$ | $2C$ | Decomposed |
+| 3 | $(H/4) \times (W/4)$ | $N/16$ | $4C$ | Decomposed |
+| 4 | $(H/8) \times (W/8)$ | $N/64$ | $8C$ | Full |
+Depth pooling mirrors the downsampling path so each stage receives a matching $z^{(s)}$ and $G^{(s)}$.
+
+## 6. Practical invariants & sanity checks
+- **Zero diagonal:** $G_{pp}=0$ so each token retains its self-attention weight.
+- **Symmetry:** $G$ remains symmetric; cross-token penalties are reciprocal.
+- **Switch-off capability:** If $w_s = w_d = 0$, geometry terms vanish and the block collapses to vanilla self-attention.
+- **Numerical stability:** Negative slopes $\lambda_c$ ensure $\beta_c^{G_{pq}} \le 1$, preventing amplification of logits.
+- **Interpretability:** Larger $w_d$ emphasises depth alignment (foreground/background separation); larger $w_s$ keeps attention localized in the image plane.
