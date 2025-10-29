@@ -29,6 +29,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
 from typing import Iterable, List, Mapping, MutableMapping, Optional, Sequence, Union
 
@@ -80,8 +81,23 @@ def _build_env(
     return env
 
 
-def _resolve_path(path: Union[str, os.PathLike]) -> str:
+def _resolve_path(
+    path: Union[str, os.PathLike],
+    *,
+    must_exist: bool = False,
+    description: str = "path",
+) -> str:
     """Return an absolute string representation for ``path``.
+
+    Parameters
+    ----------
+    path:
+        Filesystem location to normalise.
+    must_exist:
+        When ``True`` the helper raises ``FileNotFoundError`` if the target does
+        not exist.
+    description:
+        Human readable label used in error messages when ``must_exist`` is set.
 
     Relative paths are interpreted with respect to the repository root so
     callers can invoke the helpers from any working directory.
@@ -90,7 +106,35 @@ def _resolve_path(path: Union[str, os.PathLike]) -> str:
     resolved = Path(path).expanduser()
     if not resolved.is_absolute():
         resolved = ROOT / resolved
+    if must_exist and not resolved.exists():
+        raise FileNotFoundError(
+            f"Could not find the {description} at '{resolved}'. "
+            "Download or move the file to that location, or update the path."
+        )
     return str(resolved)
+
+
+def _validate_pretrained_path(config: str) -> None:
+    """Ensure the config's ``pretrained_model`` points to an existing file."""
+
+    try:
+        module = import_module(config)
+    except ModuleNotFoundError:
+        return
+
+    cfg = getattr(module, "C", None)
+    if cfg is None:
+        return
+
+    pretrained = getattr(cfg, "pretrained_model", None)
+    if not pretrained:
+        return
+
+    _resolve_path(
+        pretrained,
+        must_exist=True,
+        description=f"pretrained checkpoint referenced by {config}.C.pretrained_model",
+    )
 
 
 def _torchrun(
@@ -188,8 +232,14 @@ def launch_infer(
         extra_pythonpath=[ROOT.parent, ROOT],
     )
 
-    checkpoint_path = _resolve_path(checkpoint_path)
+    checkpoint_path = _resolve_path(
+        checkpoint_path,
+        must_exist=True,
+        description="checkpoint passed via 'checkpoint_path'",
+    )
     output_dir = _resolve_path(output_dir)
+
+    _validate_pretrained_path(config)
 
     args = [
         f"--nnodes={nnodes}",
@@ -238,7 +288,13 @@ def launch_eval(
         extra_pythonpath=[ROOT.parent, ROOT],
     )
 
-    checkpoint_path = _resolve_path(checkpoint_path)
+    checkpoint_path = _resolve_path(
+        checkpoint_path,
+        must_exist=True,
+        description="checkpoint passed via 'checkpoint_path'",
+    )
+
+    _validate_pretrained_path(config)
 
     args = [
         f"--nnodes={nnodes}",
