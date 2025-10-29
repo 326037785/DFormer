@@ -30,7 +30,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Iterable, List, Mapping, MutableMapping, Optional, Sequence, Union
 
 ROOT = Path(__file__).resolve().parent
 
@@ -80,11 +80,34 @@ def _build_env(
     return env
 
 
-def _torchrun(command: Sequence[str], env: Optional[Mapping[str, str]] = None) -> None:
+def _resolve_path(path: Union[str, os.PathLike]) -> str:
+    """Return an absolute string representation for ``path``.
+
+    Relative paths are interpreted with respect to the repository root so
+    callers can invoke the helpers from any working directory.
+    """
+
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = ROOT / resolved
+    return str(resolved)
+
+
+def _torchrun(
+    command: Sequence[str],
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    cwd: Optional[Path] = None,
+) -> None:
     """Execute ``torchrun`` with ``command`` and raise on failure."""
 
     cmdline = [sys.executable, "-m", "torch.distributed.run", *command]
-    subprocess.run(cmdline, check=True, env=dict(env) if env is not None else None)
+    subprocess.run(
+        cmdline,
+        check=True,
+        env=dict(env) if env is not None else None,
+        cwd=str(cwd) if cwd is not None else None,
+    )
 
 
 def launch_train(
@@ -142,7 +165,7 @@ def launch_train(
     if extra_args:
         args.extend(extra_args)
 
-    _torchrun(args, env)
+    _torchrun(args, env, cwd=ROOT)
 
 
 def launch_infer(
@@ -165,6 +188,9 @@ def launch_infer(
         extra_pythonpath=[ROOT.parent, ROOT],
     )
 
+    checkpoint_path = _resolve_path(checkpoint_path)
+    output_dir = _resolve_path(output_dir)
+
     args = [
         f"--nnodes={nnodes}",
         f"--node_rank={node_rank}",
@@ -181,7 +207,7 @@ def launch_infer(
     if extra_args:
         args.extend(extra_args)
 
-    _torchrun(args, env)
+    _torchrun(args, env, cwd=ROOT)
 
 
 def launch_eval(
@@ -212,6 +238,8 @@ def launch_eval(
         extra_pythonpath=[ROOT.parent, ROOT],
     )
 
+    checkpoint_path = _resolve_path(checkpoint_path)
+
     args = [
         f"--nnodes={nnodes}",
         f"--node_rank={node_rank}",
@@ -234,7 +262,7 @@ def launch_eval(
     if extra_args:
         args.extend(extra_args)
 
-    _torchrun(args, env)
+    _torchrun(args, env, cwd=ROOT)
 
 
 def main(
