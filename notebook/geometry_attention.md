@@ -44,7 +44,7 @@ S_{p,q} = |i - i'| + |j - j'|,\quad S \in \mathbb{R}^{N \times N}.
 
 Both matrices are symmetric with zero diagonals.
 
----
+Both `S` and `D` are symmetric with zero diagonals, so self-relations are unpenalised.
 
 ## 2. Geometry Prior Construction
 
