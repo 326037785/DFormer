@@ -54,19 +54,19 @@ G_{(i,j),(i',j')} = m^{d}_{(i,j),(i',j')} \cdot \lvert z_{ij} - z_{i'j'} \rvert 
 Learnable non-negative memories constrain $G$ to remain non-negative, preserving the interpretation as a geometry cost.
 
 ## Geometry Self-Attention (full)
-Standard self-attention over a single head uses projections $Q = x W_q$, $K = x W_k$, $V = x W_v$ with head dimension $d_k$; $W_q, W_k, W_v \in \mathbb{R}^{C \times d_k}$. The vanilla score matrix is $A = Q K^\top \in \mathbb{R}^{N \times N}$. Softmax normalization yields $\operatorname{Softmax}(A)$ row-wise. Geometry self-attention injects the prior through exponential decay:
+Standard self-attention over a single head uses projections $Q = x W_q$, $K = x W_k$, $V = x W_v$ with head dimension $d_k$; $W_q, W_k, W_v \in \mathbb{R}^{C \times d_k}$. The vanilla score matrix is $A = Q K^\top \in \mathbb{R}^{N \times N}$. Softmax normalization yields $\text{Softmax}(A)$ row-wise. Geometry self-attention injects the prior through exponential decay:
 \[
 \Gamma = \beta^{G} = [\beta^{G_{uv}}]_{u,v=1}^{N} \in (0,1]^{N \times N}, \quad \beta \in (0,1].
 \]
 Row-wise multiplication attenuates distant relations:
 \[
-\operatorname{GeoAttn}(x) = \left( \operatorname{Softmax}(A) \odot \Gamma \right) V \in \mathbb{R}^{N \times d_k}.
+\text{GeoAttn}(x) = \left( \text{Softmax}(A) \odot \Gamma \right) V \in \mathbb{R}^{N \times d_k}.
 \]
 Element-wise powers satisfy $\Gamma_{uu} = 1$ because $G_{uu}=0$. Off-diagonal entries shrink according to geometry costs, preserving the baseline weighting when $G$ vanishes.
 
-Derivation from vanilla attention: starting from $\operatorname{Softmax}(A) = \exp(A) / \sum_{v} \exp(A_{uv})$, inserting $\Gamma$ scales each term to $\exp(A_{uv}) \beta^{G_{uv}}$. Taking logarithms shows the modified logits equal $A_{uv} + G_{uv} \log \beta$, i.e.,
+Derivation from vanilla attention: starting from $\text{Softmax}(A) = \exp(A) / \sum_{v} \exp(A_{uv})$, inserting $\Gamma$ scales each term to $\exp(A_{uv}) \beta^{G_{uv}}$. Taking logarithms shows the modified logits equal $A_{uv} + G_{uv} \log \beta$, i.e.,
 \[
-\operatorname{GeoAttn}(x) = \operatorname{Softmax}\big(A + (\log \beta) G\big) V \in \mathbb{R}^{N \times d_k},
+\text{GeoAttn}(x) = \text{Softmax}\big(A + (\log \beta) G\big) V \in \mathbb{R}^{N \times d_k},
 \]
 which exhibits how geometry prior shifts attention logits before normalization.
 
@@ -84,10 +84,10 @@ Construct per-axis priors by summing over shared indices:
 \]
 Row-wise decay matrices become $\Gamma_x = \beta^{G_x} \in (0,1]^{N \times W}$ and $\Gamma_y = \beta^{G_y} \in (0,1]^{N \times H}$. The decomposed updates are
 \[
-Y = \left( \operatorname{Softmax}\big(Q_x K_x^{\top}\big) \odot \Gamma_x^{\uparrow} \right) V \in \mathbb{R}^{N \times d_k},
+Y = \left( \text{Softmax}\big(Q_x K_x^{\top}\big) \odot \Gamma_x^{\uparrow} \right) V \in \mathbb{R}^{N \times d_k},
 \]
 \[
-\operatorname{GeoAttn}_{\text{decomp}}(x) = \left( \operatorname{Softmax}\big(Q_y K_y^{\top}\big) \odot \Gamma_y^{\uparrow} \right) Y \in \mathbb{R}^{N \times d_k},
+\text{GeoAttn}_{\text{decomp}}(x) = \left( \text{Softmax}\big(Q_y K_y^{\top}\big) \odot \Gamma_y^{\uparrow} \right) Y \in \mathbb{R}^{N \times d_k},
 \]
 where $\Gamma_x^{\uparrow}$ and $\Gamma_y^{\uparrow}$ broadcast the per-row and per-column decays back to $N \times N$ during the sequential multiplications. This two-step process equals applying geometry penalties separately along axes, mirroring separable kernels.
 
