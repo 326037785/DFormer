@@ -1,3 +1,4 @@
+import os
 import cv2
 import torch
 import numpy as np
@@ -173,10 +174,12 @@ def get_train_loader(engine, dataset, config):
         batch_size = config.batch_size // engine.world_size
         is_shuffle = False
 
+    num_workers = 0 if os.name == "nt" else config.num_workers
+
     train_loader = data.DataLoader(
         train_dataset,
         batch_size=batch_size,
-        num_workers=config.num_workers,
+        num_workers=num_workers,
         drop_last=True,
         shuffle=is_shuffle,
         pin_memory=True,
@@ -218,10 +221,12 @@ def get_val_loader(engine, dataset, config, val_batch_size=1):
         batch_size = val_batch_size // engine.world_size
         is_shuffle = False
 
+    num_workers = 0 if os.name == "nt" else config.num_workers
+
     val_loader = data.DataLoader(
         val_dataset,
         batch_size=batch_size,
-        num_workers=config.num_workers,
+        num_workers=num_workers,
         drop_last=False,
         shuffle=is_shuffle,
         pin_memory=True,
