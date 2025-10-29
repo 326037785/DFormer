@@ -29,8 +29,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from importlib import import_module
 from pathlib import Path
-from typing import Iterable, List, Mapping, MutableMapping, Optional, Sequence
+from typing import Iterable, List, Mapping, MutableMapping, Optional, Sequence, Union
 
 ROOT = Path(__file__).resolve().parent
 
@@ -80,11 +81,77 @@ def _build_env(
     return env
 
 
-def _torchrun(command: Sequence[str], env: Optional[Mapping[str, str]] = None) -> None:
+def _resolve_path(
+    path: Union[str, os.PathLike],
+    *,
+    must_exist: bool = False,
+    description: str = "path",
+) -> str:
+    """Return an absolute string representation for ``path``.
+
+    Parameters
+    ----------
+    path:
+        Filesystem location to normalise.
+    must_exist:
+        When ``True`` the helper raises ``FileNotFoundError`` if the target does
+        not exist.
+    description:
+        Human readable label used in error messages when ``must_exist`` is set.
+
+    Relative paths are interpreted with respect to the repository root so
+    callers can invoke the helpers from any working directory.
+    """
+
+    resolved = Path(path).expanduser()
+    if not resolved.is_absolute():
+        resolved = ROOT / resolved
+    if must_exist and not resolved.exists():
+        raise FileNotFoundError(
+            f"Could not find the {description} at '{resolved}'. "
+            "Download or move the file to that location, or update the path."
+        )
+    return str(resolved)
+
+
+def _validate_pretrained_path(config: str) -> None:
+    """Ensure the config's ``pretrained_model`` points to an existing file."""
+
+    try:
+        module = import_module(config)
+    except ModuleNotFoundError:
+        return
+
+    cfg = getattr(module, "C", None)
+    if cfg is None:
+        return
+
+    pretrained = getattr(cfg, "pretrained_model", None)
+    if not pretrained:
+        return
+
+    _resolve_path(
+        pretrained,
+        must_exist=True,
+        description=f"pretrained checkpoint referenced by {config}.C.pretrained_model",
+    )
+
+
+def _torchrun(
+    command: Sequence[str],
+    env: Optional[Mapping[str, str]] = None,
+    *,
+    cwd: Optional[Path] = None,
+) -> None:
     """Execute ``torchrun`` with ``command`` and raise on failure."""
 
     cmdline = [sys.executable, "-m", "torch.distributed.run", *command]
-    subprocess.run(cmdline, check=True, env=dict(env) if env is not None else None)
+    subprocess.run(
+        cmdline,
+        check=True,
+        env=dict(env) if env is not None else None,
+        cwd=str(cwd) if cwd is not None else None,
+    )
 
 
 def launch_train(
@@ -142,7 +209,7 @@ def launch_train(
     if extra_args:
         args.extend(extra_args)
 
-    _torchrun(args, env)
+    _torchrun(args, env, cwd=ROOT)
 
 
 def launch_infer(
@@ -165,6 +232,15 @@ def launch_infer(
         extra_pythonpath=[ROOT.parent, ROOT],
     )
 
+    checkpoint_path = _resolve_path(
+        checkpoint_path,
+        must_exist=True,
+        description="checkpoint passed via 'checkpoint_path'",
+    )
+    output_dir = _resolve_path(output_dir)
+
+    _validate_pretrained_path(config)
+
     args = [
         f"--nnodes={nnodes}",
         f"--node_rank={node_rank}",
@@ -181,7 +257,7 @@ def launch_infer(
     if extra_args:
         args.extend(extra_args)
 
-    _torchrun(args, env)
+    _torchrun(args, env, cwd=ROOT)
 
 
 def launch_eval(
@@ -212,6 +288,14 @@ def launch_eval(
         extra_pythonpath=[ROOT.parent, ROOT],
     )
 
+    checkpoint_path = _resolve_path(
+        checkpoint_path,
+        must_exist=True,
+        description="checkpoint passed via 'checkpoint_path'",
+    )
+
+    _validate_pretrained_path(config)
+
     args = [
         f"--nnodes={nnodes}",
         f"--node_rank={node_rank}",
@@ -234,7 +318,7 @@ def launch_eval(
     if extra_args:
         args.extend(extra_args)
 
-    _torchrun(args, env)
+    _torchrun(args, env, cwd=ROOT)
 
 
 def main(
