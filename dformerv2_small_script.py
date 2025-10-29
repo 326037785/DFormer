@@ -1,25 +1,36 @@
-"""Utility script to assemble a DFormerv2 Small network using the project's builder."""
+"""Assemble a DFormerV2 Small network from its individual building blocks."""
 
-import copy
+from __future__ import annotations
+
 import importlib.util
+import os
+import pathlib
 import sys
 import types
-from typing import Optional
+from dataclasses import dataclass
+from typing import Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
+# ---------------------------------------------------------------------------
+# Environment helpers
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = pathlib.Path(__file__).resolve().parent
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+
 def _ensure_mmengine_stubs() -> None:
     """Provide light-weight fallbacks for mmengine/mmcv/mmseg if missing.
 
-    The decoding heads shipped with the project rely on a couple of helper
-    classes from the OpenMMLab stack. The execution environment used for the
-    script might not have those heavy dependencies installed.  When they are
-    missing we provide very small stand-ins that mimic the interfaces required
-    by the shipped heads so that the model can still be instantiated for quick
-    experiments.
+    The decoding heads shipped with the project rely on helpers from the
+    OpenMMLab stack.  When those heavy dependencies are not installed we create
+    small stand-ins that mimic the tiny parts of the API exercised by the
+    DFormer modules so that the network can still be instantiated.
     """
 
     if importlib.util.find_spec("mmengine") is None:
@@ -35,7 +46,6 @@ def _ensure_mmengine_stubs() -> None:
             def init_weights(self) -> None:  # pragma: no cover - simple stub
                 if self.init_cfg is None:
                     return
-                # mimic mmengine behaviour by applying init_cfg if possible
                 if isinstance(self.init_cfg, dict) and self.init_cfg.get("type") == "Normal":
                     std = self.init_cfg.get("std", 1.0)
                     name = self.init_cfg.get("override", {}).get("name")
@@ -126,10 +136,6 @@ def _ensure_mmengine_stubs() -> None:
         sys.modules["mmcv"] = mmcv_module
         sys.modules["mmcv.cnn"] = cnn_module
 
-    # mmseg is present in the environment shipped with the repo, but the ops
-    # submodule depends on mmcv.  When mmcv is replaced with the stub above we
-    # also provide a very small replacement for the resize helper used by the
-    # decode heads.
     if importlib.util.find_spec("mmseg.ops") is None:
         mmseg_module = sys.modules.get("mmseg")
         if mmseg_module is None:
@@ -145,36 +151,96 @@ def _ensure_mmengine_stubs() -> None:
         sys.modules["mmseg.ops"] = ops_module
 
 
-def _build_config(load_pretrained: bool = False):
-    from local_configs.NYUDepthv2.DFormerv2_S import config as base_config
+@dataclass
+class DFormerV2SmallConfig:
+    """Configuration for assembling the DFormerV2 Small network."""
 
-    cfg = copy.deepcopy(base_config)
-    if not load_pretrained:
-        cfg.pretrained_model = None
-    return cfg
+    num_classes: int = 40
+    drop_path_rate: float = 0.25
+    decoder_embed_dim: int = 512
+    bn_eps: float = 1e-3
+    bn_momentum: float = 0.1
+    use_syncbn: bool = False
+    pretrained_path: Optional[str] = None
+
+    @property
+    def channels(self) -> Sequence[int]:
+        return (64, 128, 256, 512)
+
+    @property
+    def norm_cfg(self) -> dict:
+        return dict(type="SyncBN" if self.use_syncbn else "BN", requires_grad=True)
 
 
 class DFormerV2_Small(nn.Module):
-    """Thin wrapper around the project's EncoderDecoder for inference/demo."""
+    """Explicit composition of the DFormerV2 Small RGB-D segmentation model."""
 
-    def __init__(self, load_pretrained: bool = False) -> None:
+    def __init__(self, cfg: Optional[DFormerV2SmallConfig] = None) -> None:
         super().__init__()
         _ensure_mmengine_stubs()
-        from models.builder import EncoderDecoder
 
-        cfg = _build_config(load_pretrained=load_pretrained)
+        if cfg is None:
+            cfg = DFormerV2SmallConfig()
         self.cfg = cfg
-        self.model = EncoderDecoder(cfg=cfg, criterion=None)
-        # Explicitly initialise the decoder since we skipped the criterion.
-        self.model.init_weights(cfg, pretrained=cfg.pretrained_model)
+
+        from models.encoders.DFormerv2 import DFormerv2_S
+        from models.decoders.ham_head import LightHamHead
+        from utils.init_func import init_weight
+
+        norm_layer: type[nn.Module]
+        if cfg.use_syncbn and hasattr(nn, "SyncBatchNorm"):
+            norm_layer = nn.SyncBatchNorm
+        else:
+            norm_layer = nn.BatchNorm2d
+
+        self.backbone = DFormerv2_S(drop_path_rate=cfg.drop_path_rate, norm_cfg=cfg.norm_cfg)
+        self.encoder = self.backbone.layers  # expose encoder stack for clarity
+
+        self.decode_head = LightHamHead(
+            in_channels=cfg.channels[1:],
+            in_index=[1, 2, 3],
+            channels=cfg.decoder_embed_dim,
+            ham_channels=cfg.decoder_embed_dim,
+            num_classes=cfg.num_classes,
+            norm_cfg=cfg.norm_cfg,
+            align_corners=False,
+        )
+
+        self.decoder = self.decode_head  # alias for readability
+        self.head = self.decode_head.cls_seg
+        self.align_corners = False
+
+        self._init_weights(init_weight, norm_layer)
+
+    def _init_weights(self, init_weight, norm_layer: type[nn.Module]) -> None:
+        pretrained = self.cfg.pretrained_path
+        if pretrained is not None and not os.path.exists(pretrained):
+            raise FileNotFoundError(f"Pretrained weights not found: {pretrained}")
+
+        self.backbone.init_weights(pretrained)
+        init_weight(
+            self.decode_head,
+            nn.init.kaiming_normal_,
+            norm_layer,
+            self.cfg.bn_eps,
+            self.cfg.bn_momentum,
+            mode="fan_in",
+            nonlinearity="relu",
+        )
 
     def forward(self, rgb: torch.Tensor, depth: Optional[torch.Tensor] = None) -> torch.Tensor:
         if depth is None:
             depth = torch.zeros(rgb.size(0), 1, rgb.size(2), rgb.size(3), device=rgb.device, dtype=rgb.dtype)
-        return self.model(rgb, depth)
+
+        features = self.backbone(rgb, depth)
+        logits = self.decode_head(features)
+        logits = F.interpolate(logits, size=rgb.shape[2:], mode="bilinear", align_corners=self.align_corners)
+        return logits
 
 
-def main() -> None:
+def demo_forward_pass() -> Tuple[torch.Tensor, torch.Tensor]:
+    """Run a forward pass with random tensors to demonstrate the model wiring."""
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = DFormerV2_Small().to(device)
     model.eval()
@@ -183,8 +249,15 @@ def main() -> None:
     depth = torch.randn(1, 1, 480, 640, device=device)
 
     with torch.no_grad():
-        output = model(rgb, depth)
-    print("Output shape:", tuple(output.shape))
+        logits = model(rgb, depth)
+
+    return logits.cpu(), rgb.cpu()
+
+
+def main() -> None:
+    logits, rgb = demo_forward_pass()
+    print("Input RGB shape:", tuple(rgb.shape))
+    print("Output logits shape:", tuple(logits.shape))
 
 
 if __name__ == "__main__":
