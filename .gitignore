@@ -177,3 +177,18 @@ infer*.sh
 
 # temp ignore:
 **/*_temp*
+
+# Allow documentation placeholders inside ignored folders
+!datasets/
+datasets/*
+!datasets/README.md
+
+!checkpoints/
+checkpoints/*
+!checkpoints/README.md
+!checkpoints/pretrained/
+checkpoints/pretrained/*
+!checkpoints/pretrained/README.md
+!checkpoints/trained/
+checkpoints/trained/*
+!checkpoints/trained/README.md
