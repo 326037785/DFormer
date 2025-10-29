@@ -106,12 +106,35 @@ conda create -n dformer python=3.10 -y
 conda activate dformer
 
 # CUDA 11.8
-conda install pytorch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 pytorch-cuda=11.8 -c pytorch -c nvidia
+# Please choose the right PyTorch build for your system from the official selector:
+# https://pytorch.org/get-started/locally/
+conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
 
 pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
 
-pip install tqdm opencv-python scipy tensorboardX tabulate easydict ftfy regex
+pip install numpy==1.26.4 opencv-python==4.8.1.78 tqdm scipy tensorboardX tabulate easydict ftfy regex timm
 ```
+
+> ⚠️ 如需指定其他 CUDA 版本，请参考 [PyTorch 官方安装指南](https://pytorch.org/get-started/locally/) 并选择与您硬件环境兼容的命令。
+
+**Windows (pip) 安装示例**
+
+在 Windows 环境下，我们建议使用 [Miniconda](https://docs.conda.io/en/latest/miniconda.html) 或 [Anaconda](https://www.anaconda.com/) 管理 Python 依赖，并遵循以下步骤：
+
+```powershell
+conda create -n dformer python=3.10 -y
+conda activate dformer
+
+# 访问 https://pytorch.org/get-started/locally/ 并根据自身的 CUDA 版本复制匹配的 Windows 安装命令
+# 例如 CUDA 11.8 + pip:
+pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
+
+pip install mmcv==2.1.0 -f https://download.openmmlab.com/mmcv/dist/cu118/torch2.1/index.html
+
+pip install numpy==1.26.4 opencv-python==4.8.1.78 tqdm scipy tensorboardX tabulate easydict ftfy regex timm
+```
+
+> ✅ 如果您使用 CPU 或其他 CUDA 版本，请在 PyTorch 官方页面生成对应命令后替换上面的示例。保证 `numpy` 固定为 `1.26.4`、`opencv-python` 固定为 `4.8.x`（如 `4.8.1.78`），并确保安装 `timm`，以获得经过验证的依赖组合。
 
 
 **1. Download Datasets and Checkpoints.**
