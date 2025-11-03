@@ -226,23 +226,38 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def main() -> None:
-    args = parse_args()
+def run_demo(
+    *,
+    dataset: str = "NYUDepthv2",
+    variant: str = "DFormer_Tiny",
+    datasets_root: Path | str = Path(__file__).resolve().parents[1] / "datasets",
+    epochs: int = 2,
+    seed: int = 0,
+    max_train_samples: int | None = 8,
+    max_val_samples: int | None = 2,
+    batch_size: int | None = None,
+    num_workers: int | None = None,
+) -> None:
+    """Run the end-to-end demo programmatically.
 
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    This helper mirrors the CLI workflow but exposes keyword arguments so that the
+    pipeline can be driven from a notebook or debugger session.
+    """
 
-    config = load_experiment_config(args.dataset, args.variant, args.datasets_root)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    if args.batch_size is not None:
-        config.batch_size = args.batch_size
-    if args.num_workers is not None:
-        config.num_workers = args.num_workers
+    config = load_experiment_config(dataset, variant, Path(datasets_root))
+
+    if batch_size is not None:
+        config.batch_size = batch_size
+    if num_workers is not None:
+        config.num_workers = num_workers
 
     ensure_dataset_exists(config)
 
-    max_train = args.max_train_samples if args.max_train_samples and args.max_train_samples > 0 else None
-    max_val = args.max_val_samples if args.max_val_samples and args.max_val_samples > 0 else None
+    max_train = max_train_samples if max_train_samples and max_train_samples > 0 else None
+    max_val = max_val_samples if max_val_samples and max_val_samples > 0 else None
 
     train_loader, val_loader = build_datasets(
         config,
@@ -268,8 +283,8 @@ def main() -> None:
     if max_val is not None:
         print(f"  -> Validation subset capped to {len(val_loader.dataset)} samples.")
 
-    print(f"Training on {len(train_loader.dataset)} samples for {args.epochs} epoch(s)...")
-    for epoch in range(1, args.epochs + 1):
+    print(f"Training on {len(train_loader.dataset)} samples for {epochs} epoch(s)...")
+    for epoch in range(1, epochs + 1):
         mean_loss = train_one_epoch(model, train_loader, optimizer, device)
         print(f"Epoch {epoch}: loss={mean_loss:.4f}")
 
@@ -280,6 +295,43 @@ def main() -> None:
     for class_id, count in zip(unique, counts):
         print(f"  {class_id}: {int(count)}")
     print(f"Mean confidence: {confidence.mean():.3f}")
+
+
+def main() -> None:
+    args = parse_args()
+
+    # 示例：测试 DFormerV2 网络（已按规范放置 datasets/NYUDepthv2）
+    # python demos/pipeline_demo.py \
+    #     --dataset NYUDepthv2 \
+    #     --variant DFormerv2_B \
+    #     --datasets-root ./datasets \
+    #     --epochs 1 \
+    #     --max-train-samples 0 \
+    #     --max-val-samples 0
+
+    # 示例：在 Python 代码中直接调用，便于断点调试
+    # from pathlib import Path
+    # from demos.pipeline_demo import run_demo
+    # run_demo(
+    #     dataset="NYUDepthv2",
+    #     variant="DFormerv2_B",
+    #     datasets_root=Path("./datasets"),
+    #     epochs=1,
+    #     max_train_samples=None,
+    #     max_val_samples=None,
+    # )
+
+    run_demo(
+        dataset=args.dataset,
+        variant=args.variant,
+        datasets_root=args.datasets_root,
+        epochs=args.epochs,
+        seed=args.seed,
+        max_train_samples=args.max_train_samples,
+        max_val_samples=args.max_val_samples,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+    )
 
 
 if __name__ == "__main__":
